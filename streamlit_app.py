@@ -848,13 +848,34 @@ def sample_risk_table():
 # Streamlit app
 # -----------------------------
 
-st.set_page_config(page_title="Enhanced Survival Distribution Fitting Agent", layout="wide")
+st.set_page_config(page_title="Enhanced Survival Distribution Fitting Agent", page_icon="🧬", layout="wide")
 
-st.title("Enhanced Survival Distribution Fitting Agent")
-st.caption(
-    "Fit parametric survival curves from IPD or digitised Kaplan-Meier data, "
-    "export parameters/formulas, choose displayed distributions, combine two distributions by weight, "
-    "and convert monthly cycle probabilities to annual transition probabilities."
+st.markdown(
+    """
+    <style>
+    .hero {background: linear-gradient(135deg, #0d3b6a, #1779c2); padding: 2rem 2.5rem; border-radius: 1.5rem; color: white; box-shadow: 0 24px 80px rgba(0, 0, 0, 0.12); margin-bottom: 1.5rem;}
+    .hero h1 {margin: 0 0 0.35rem 0; font-size: 2.8rem; line-height: 1.05;}
+    .hero p {margin: 0; font-size: 1.05rem; opacity: 0.92; line-height: 1.7;}
+    .download-card {background: #f0f7ff; padding: 1.25rem; border-radius: 1rem; box-shadow: inset 0 0 0 1px rgba(23, 95, 207, 0.08);}
+    .metric-card .stMetric > div {border-radius: 1rem;}
+    .stDownloadButton>button {border-radius: 0.75rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="hero">
+      <h1>Enhanced Survival Distribution Fitting Agent</h1>
+      <p>Convert IPD or digitised Kaplan–Meier data into fitted survival distributions, formulas, transition probabilities, and export-ready outputs.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.info(
+    "Use the sidebar to select input type, configure cycles, and preview fitted survival curves and outputs."
 )
 
 st.warning(
@@ -1043,108 +1064,123 @@ with formula_col:
     st.write("Survival-function formulas for Excel, TreeAge and R")
     st.dataframe(formula_table, use_container_width=True)
 
-st.subheader("Parametric survival curves")
-model_options = list(fitted_models.keys())
-default_models = model_options
-selected_curve_models = st.multiselect(
-    "Choose which fitted distributions to show on the curve",
-    options=model_options,
-    default=default_models,
-)
+tab_ranking, tab_curves, tab_transitions = st.tabs([
+    "Model ranking",
+    "Parametric survival curves",
+    "Transition probabilities",
+])
 
-fig_fits = plot_parametric_fits(ipd, survival_predictions, selected_models=selected_curve_models)
-st.pyplot(fig_fits)
-
-st.subheader("Weighted distribution between two fitted curves")
-weighted_col1, weighted_col2, weighted_col3 = st.columns(3)
-
-with weighted_col1:
-    model_a = st.selectbox("Distribution A", options=model_options, index=0)
-with weighted_col2:
-    model_b_index = 1 if len(model_options) > 1 else 0
-    model_b = st.selectbox("Distribution B", options=model_options, index=model_b_index)
-with weighted_col3:
-    weight_a = st.slider(
-        "Weight on distribution A",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.50,
-        step=0.05,
-        help="Weighted survival is calculated as w*S_A(t) + (1-w)*S_B(t). Cycle probabilities are then derived from the weighted survival curve.",
+with tab_ranking:
+    st.subheader("Model ranking")
+    st.dataframe(fit_table, use_container_width=True)
+    best_model = fit_table.loc[fit_table["status"] == "Fitted", "model"].iloc[0]
+    st.success(
+        f"Best statistical fit by AIC: {best_model}. "
+        "Also review visual fit, hazard shape, and clinical plausibility."
     )
 
-weighted_survival_predictions = make_weighted_survival_predictions(
-    fitted_models,
-    model_a=model_a,
-    model_b=model_b,
-    weight_a=float(weight_a),
-    horizon=float(plot_horizon),
-    n_points=301,
-)
-weighted_cycle_probs = make_weighted_cycle_probabilities(
-    fitted_models,
-    model_a=model_a,
-    model_b=model_b,
-    weight_a=float(weight_a),
-    n_cycles=int(n_cycles),
-    cycle_length=float(cycle_length),
-)
+with tab_curves:
+    st.subheader("Parametric survival curves")
+    model_options = list(fitted_models.keys())
+    default_models = model_options
+    selected_curve_models = st.multiselect(
+        "Choose which fitted distributions to show on the curve",
+        options=model_options,
+        default=default_models,
+    )
+    fig_fits = plot_parametric_fits(ipd, survival_predictions, selected_models=selected_curve_models)
+    st.pyplot(fig_fits)
 
-weighted_label = weighted_survival_predictions["model"].iloc[0]
-combined_predictions_for_plot = pd.concat(
-    [survival_predictions, weighted_survival_predictions[["model", "time", "survival"]]],
-    ignore_index=True,
-)
-combined_selected_models = list(selected_curve_models) + [weighted_label]
-fig_weighted = plot_parametric_fits(ipd, combined_predictions_for_plot, selected_models=combined_selected_models)
-st.pyplot(fig_weighted)
+    st.markdown("---")
+    st.subheader("Weighted distribution between two fitted curves")
+    weighted_col1, weighted_col2, weighted_col3 = st.columns(3)
+    with weighted_col1:
+        model_a = st.selectbox("Distribution A", options=model_options, index=0)
+    with weighted_col2:
+        model_b_index = 1 if len(model_options) > 1 else 0
+        model_b = st.selectbox("Distribution B", options=model_options, index=model_b_index)
+    with weighted_col3:
+        weight_a = st.slider(
+            "Weight on distribution A",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.50,
+            step=0.05,
+            help="Weighted survival is calculated as w*S_A(t) + (1-w)*S_B(t). Cycle probabilities are then derived from the weighted survival curve.",
+        )
 
-st.markdown(
-    "Weighted curve formula: `S_weighted(t) = w*S_A(t) + (1-w)*S_B(t)`. "
-    "The transition probability is then calculated from the weighted survival curve: "
-    "`p = 1 - S_weighted(t_end) / S_weighted(t_start)`."
-)
-
-st.subheader("Cycle transition probabilities")
-selected_prob_model = st.selectbox(
-    "Select fitted distribution to view transition probabilities",
-    options=model_options,
-    index=model_options.index(best_model),
-)
-selected_probs = cycle_probs[cycle_probs["model"] == selected_prob_model].copy()
-st.dataframe(selected_probs, use_container_width=True)
-
-with st.expander("View weighted-cycle probabilities"):
-    st.dataframe(weighted_cycle_probs, use_container_width=True)
-
-st.markdown(
-    "Cycle event probability is calculated as `p = 1 - S(t + cycle length) / S(t)`. "
-    "If input time is in months and cycle length is `12`, this directly gives annual event probabilities. "
-    "If cycle length is `1`, monthly probabilities can be annualised below."
-)
-
-fig_probs = plot_hazard_proxy(
-    pd.concat([cycle_probs, weighted_cycle_probs[cycle_probs.columns]], ignore_index=True),
-    selected_models=combined_selected_models,
-)
-st.pyplot(fig_probs)
-
-st.subheader("Monthly to annual probability conversion")
-annual_probs = pd.DataFrame()
-
-if time_unit == "Months" and abs(float(cycle_length) - 1.0) < 1e-9:
-    combined_cycle_probs = pd.concat([cycle_probs, weighted_cycle_probs[cycle_probs.columns]], ignore_index=True)
-    annual_probs = make_annual_probabilities_from_monthly_cycles(combined_cycle_probs, months_per_year=12)
-    st.write("Annual probabilities generated from monthly cycle probabilities.")
-    st.dataframe(annual_probs, use_container_width=True)
-else:
-    st.info(
-        "To generate annual probabilities from monthly cycles, set input time unit to Months and cycle length to 1. "
-        "If you set cycle length to 12 with month-based data, your cycle probabilities are already annual probabilities."
+    weighted_survival_predictions = make_weighted_survival_predictions(
+        fitted_models,
+        model_a=model_a,
+        model_b=model_b,
+        weight_a=float(weight_a),
+        horizon=float(plot_horizon),
+        n_points=301,
+    )
+    weighted_cycle_probs = make_weighted_cycle_probabilities(
+        fitted_models,
+        model_a=model_a,
+        model_b=model_b,
+        weight_a=float(weight_a),
+        n_cycles=int(n_cycles),
+        cycle_length=float(cycle_length),
     )
 
-with st.expander("General conversion formulas"):
-    st.dataframe(make_conversion_examples(), use_container_width=True)
+    weighted_label = weighted_survival_predictions["model"].iloc[0]
+    combined_predictions_for_plot = pd.concat(
+        [survival_predictions, weighted_survival_predictions[["model", "time", "survival"]]],
+        ignore_index=True,
+    )
+    combined_selected_models = list(selected_curve_models) + [weighted_label]
+    fig_weighted = plot_parametric_fits(ipd, combined_predictions_for_plot, selected_models=combined_selected_models)
+    st.pyplot(fig_weighted)
+
+    st.markdown(
+        "Weighted curve formula: `S_weighted(t) = w*S_A(t) + (1-w)*S_B(t)`. "
+        "The transition probability is then calculated from the weighted survival curve: "
+        "`p = 1 - S_weighted(t_end) / S_weighted(t_start)`."
+    )
+
+with tab_transitions:
+    st.subheader("Cycle transition probabilities")
+    selected_prob_model = st.selectbox(
+        "Select fitted distribution to view transition probabilities",
+        options=model_options,
+        index=model_options.index(best_model),
+    )
+    selected_probs = cycle_probs[cycle_probs["model"] == selected_prob_model].copy()
+    st.dataframe(selected_probs, use_container_width=True)
+
+    with st.expander("View weighted-cycle probabilities"):
+        st.dataframe(weighted_cycle_probs, use_container_width=True)
+
+    st.markdown(
+        "Cycle event probability is calculated as `p = 1 - S(t + cycle length) / S(t)`. "
+        "If input time is in months and cycle length is `12`, this directly gives annual event probabilities. "
+        "If cycle length is `1`, monthly probabilities can be annualised below."
+    )
+
+    fig_probs = plot_hazard_proxy(
+        pd.concat([cycle_probs, weighted_cycle_probs[cycle_probs.columns]], ignore_index=True),
+        selected_models=combined_selected_models,
+    )
+    st.pyplot(fig_probs)
+
+    st.subheader("Monthly to annual probability conversion")
+    annual_probs = pd.DataFrame()
+    if time_unit == "Months" and abs(float(cycle_length) - 1.0) < 1e-9:
+        combined_cycle_probs = pd.concat([cycle_probs, weighted_cycle_probs[cycle_probs.columns]], ignore_index=True)
+        annual_probs = make_annual_probabilities_from_monthly_cycles(combined_cycle_probs, months_per_year=12)
+        st.success("Annual probabilities generated from monthly cycle probabilities.")
+        st.dataframe(annual_probs, use_container_width=True)
+    else:
+        st.info(
+            "To generate annual probabilities from monthly cycles, set input time unit to Months and cycle length to 1. "
+            "If you set cycle length to 12 with month-based data, your cycle probabilities are already annual probabilities."
+        )
+
+    with st.expander("General conversion formulas"):
+        st.dataframe(make_conversion_examples(), use_container_width=True)
 
 
 # -----------------------------
@@ -1167,48 +1203,53 @@ excel_bytes = make_excel_export(
     diagnostics=diagnostics,
 )
 
-st.download_button(
-    label="Download Excel output",
-    data=excel_bytes,
-    file_name="enhanced_survival_fitting_output.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-
-st.download_button(
-    label="Download IPD / pseudo-IPD as CSV",
-    data=ipd.to_csv(index=False).encode("utf-8"),
-    file_name="pseudo_ipd.csv",
-    mime="text/csv",
-)
-
-st.download_button(
-    label="Download cycle probabilities as CSV",
-    data=cycle_probs.to_csv(index=False).encode("utf-8"),
-    file_name="cycle_transition_probabilities.csv",
-    mime="text/csv",
-)
-
-st.download_button(
-    label="Download estimated parameters as CSV",
-    data=parameter_table.to_csv(index=False).encode("utf-8"),
-    file_name="estimated_survival_parameters.csv",
-    mime="text/csv",
-)
-
-st.download_button(
-    label="Download formula export as CSV",
-    data=formula_table.to_csv(index=False).encode("utf-8"),
-    file_name="survival_formula_export.csv",
-    mime="text/csv",
-)
-
-if len(annual_probs) > 0:
+st.markdown("<div class='download-card'>", unsafe_allow_html=True)
+col_a, col_b, col_c = st.columns(3)
+with col_a:
     st.download_button(
-        label="Download annual probabilities from monthly cycles as CSV",
-        data=annual_probs.to_csv(index=False).encode("utf-8"),
-        file_name="annual_probabilities_from_monthly_cycles.csv",
+        label="Download Excel output",
+        data=excel_bytes,
+        file_name="enhanced_survival_fitting_output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+with col_b:
+    st.download_button(
+        label="Download IPD / pseudo-IPD as CSV",
+        data=ipd.to_csv(index=False).encode("utf-8"),
+        file_name="pseudo_ipd.csv",
         mime="text/csv",
     )
+with col_c:
+    st.download_button(
+        label="Download cycle probabilities as CSV",
+        data=cycle_probs.to_csv(index=False).encode("utf-8"),
+        file_name="cycle_transition_probabilities.csv",
+        mime="text/csv",
+    )
+col_d, col_e, col_f = st.columns(3)
+with col_d:
+    st.download_button(
+        label="Download estimated parameters as CSV",
+        data=parameter_table.to_csv(index=False).encode("utf-8"),
+        file_name="estimated_survival_parameters.csv",
+        mime="text/csv",
+    )
+with col_e:
+    st.download_button(
+        label="Download formula export as CSV",
+        data=formula_table.to_csv(index=False).encode("utf-8"),
+        file_name="survival_formula_export.csv",
+        mime="text/csv",
+    )
+with col_f:
+    if len(annual_probs) > 0:
+        st.download_button(
+            label="Download annual probabilities from monthly cycles as CSV",
+            data=annual_probs.to_csv(index=False).encode("utf-8"),
+            file_name="annual_probabilities_from_monthly_cycles.csv",
+            mime="text/csv",
+        )
+st.markdown("</div>", unsafe_allow_html=True)
 
 st.download_button(
     label="Download weighted cycle probabilities as CSV",
