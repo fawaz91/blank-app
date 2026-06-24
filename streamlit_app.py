@@ -862,13 +862,15 @@ if KM_REGISTRY_AVAILABLE:
         st.markdown("---")
         tool = st.radio(
             "📊 Select Tool:",
-            ["Survival Fitting", "KM Registry Mortality"],
+            ["KM Registry Mortality", "Survival Fitting"],
+            index=0,
             horizontal=False,
-            help="Choose between parametric survival distribution fitting or KM digitization with registry mortality adjustment"
+            help="Choose between KM digitization with registry mortality adjustment or parametric survival distribution fitting"
         )
-        if tool == "KM Registry Mortality":
-            render_km_registry_tool()
-            st.stop()
+
+    if tool == "KM Registry Mortality":
+        render_km_registry_tool()
+        st.stop()
 
 st.markdown(
     """

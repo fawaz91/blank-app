@@ -777,6 +777,131 @@ def build_extrapolated_survival_table(
     return pd.DataFrame(rows)
 
 
+
+# -----------------------------
+# Multi-distribution fitting and calibration helpers
+# -----------------------------
+
+def _norm_cdf(x):
+    return 0.5 * (1 + np.vectorize(lambda z: __import__("math").erf(z / np.sqrt(2)))(x))
+
+
+def parametric_survival(t, dist_name, params):
+    t = np.maximum(np.asarray(t, dtype=float), EPS)
+    if dist_name == "Exponential":
+        rate = params[0]
+        return np.exp(-rate * t)
+    if dist_name == "Weibull":
+        shape, scale = params
+        return np.exp(-((t / scale) ** shape))
+    if dist_name == "Log-normal":
+        mu, sigma = params
+        return 1 - _norm_cdf((np.log(t) - mu) / sigma)
+    if dist_name == "Log-logistic":
+        alpha, beta = params
+        return 1 / (1 + (t / alpha) ** beta)
+    raise ValueError(f"Unsupported distribution: {dist_name}")
+
+
+def parametric_formula(dist_name):
+    formulas = {
+        "Exponential": "S(t)=exp(-rate*t)",
+        "Weibull": "S(t)=exp(-((t/scale)^shape))",
+        "Log-normal": "S(t)=1-Phi((ln(t)-mu)/sigma)",
+        "Log-logistic": "S(t)=1/(1+(t/alpha)^beta)",
+    }
+    return formulas.get(dist_name, "")
+
+
+def fit_parametric_models_to_km(km_df, selected_distributions=None):
+    """Fit common survival distributions directly to digitized KM points."""
+    if selected_distributions is None:
+        selected_distributions = ["Exponential", "Weibull", "Log-normal", "Log-logistic"]
+
+    df = km_df.copy()
+    y_col = "survival_monotone" if "survival_monotone" in df.columns else "survival"
+    df = df[(df["time"] > 0) & (df[y_col] > 0.001) & (df[y_col] < 0.999)].copy()
+    if len(df) < 3:
+        raise ValueError("Need at least 3 usable KM points between 0 and 1 to fit parametric curves.")
+
+    t = df["time"].to_numpy(dtype=float)
+    s_obs = df[y_col].to_numpy(dtype=float)
+    rows, fitted = [], {}
+
+    specs = {
+        "Exponential": {"pnames": ["rate"], "init": [max(-np.log(s_obs[-1]) / max(t[-1], EPS), EPS)]},
+        "Weibull": {"pnames": ["shape", "scale"], "init": [1.2, max(np.median(t), EPS)]},
+        "Log-normal": {"pnames": ["mu", "sigma"], "init": [np.log(max(np.median(t), EPS)), 0.8]},
+        "Log-logistic": {"pnames": ["alpha", "beta"], "init": [max(np.median(t), EPS), 1.2]},
+    }
+
+    for name in selected_distributions:
+        try:
+            spec = specs[name]
+            def objective(log_par):
+                par = np.exp(log_par)
+                pred = np.clip(parametric_survival(t, name, par), EPS, 1)
+                return np.sum((np.log(np.clip(s_obs, EPS, 1)) - np.log(pred)) ** 2)
+            result = minimize(objective, np.log(spec["init"]), method="Nelder-Mead")
+            par = np.exp(result.x)
+            pred = np.clip(parametric_survival(t, name, par), EPS, 1)
+            resid = np.log(np.clip(s_obs, EPS, 1)) - np.log(pred)
+            sse = float(np.sum(resid ** 2))
+            n = len(t); k = len(par)
+            sigma2 = sse / max(n - k, 1)
+            se = np.repeat(np.nan, k)
+            try:
+                jac = []
+                base = np.log(par)
+                for j in range(k):
+                    step = 1e-5
+                    up = base.copy(); up[j] += step
+                    dn = base.copy(); dn[j] -= step
+                    ru = np.log(np.clip(s_obs, EPS, 1)) - np.log(np.clip(parametric_survival(t, name, np.exp(up)), EPS, 1))
+                    rd = np.log(np.clip(s_obs, EPS, 1)) - np.log(np.clip(parametric_survival(t, name, np.exp(dn)), EPS, 1))
+                    jac.append((ru - rd) / (2 * step))
+                cov_log = sigma2 * np.linalg.pinv(np.vstack(jac).T.T @ np.vstack(jac).T)
+                se = np.sqrt(np.diag(cov_log)) * par
+            except Exception:
+                pass
+            aic = n * np.log(max(sse / n, EPS)) + 2 * k
+            bic = n * np.log(max(sse / n, EPS)) + k * np.log(n)
+            fitted[name] = {"params": dict(zip(spec["pnames"], par)), "param_vector": par}
+            rows.append({"distribution": name, "formula": parametric_formula(name), "SSE_log_survival": sse, "AIC_approx": aic, "BIC_approx": bic, "success": bool(result.success), **{f"{pn}": pv for pn, pv in zip(spec["pnames"], par)}, **{f"SE_{pn}": sv for pn, sv in zip(spec["pnames"], se)}})
+        except Exception as e:
+            rows.append({"distribution": name, "formula": parametric_formula(name), "SSE_log_survival": np.nan, "AIC_approx": np.nan, "BIC_approx": np.nan, "success": False, "error": str(e)})
+    return fitted, pd.DataFrame(rows).sort_values("AIC_approx", na_position="last")
+
+
+def apply_background_mortality_to_km(km_df, bg_df, start_age, mode="remove_expected"):
+    out = km_df.copy()
+    times = out["time"].to_numpy(dtype=float)
+    hazards = np.array([background_rate_at_age(bg_df, start_age + t) for t in times])
+    cumulative_bg = np.zeros_like(times)
+    if len(times) > 1:
+        dt = np.diff(times)
+        cumulative_bg[1:] = np.cumsum(0.5 * (hazards[:-1] + hazards[1:]) * dt)
+    s_bg = np.exp(-cumulative_bg)
+    base = out["survival_monotone"].to_numpy(dtype=float) if "survival_monotone" in out.columns else out["survival"].to_numpy(dtype=float)
+    if mode == "remove_expected":
+        adjusted = np.clip(base / np.maximum(s_bg, EPS), 0, 1)
+    else:
+        adjusted = np.clip(base * s_bg, 0, 1)
+    out["background_survival"] = s_bg
+    out["survival_bg_adjusted"] = np.minimum.accumulate(adjusted)
+    return out
+
+
+def calibrate_survival_to_registry(km_df, registry_time, registry_survival, source_col="survival_monotone"):
+    out = km_df.copy()
+    source_col = source_col if source_col in out.columns else "survival"
+    observed = max(float(survival_at_times(out.rename(columns={source_col: "survival_monotone"}), [registry_time])[0]), EPS)
+    multiplier = np.log(max(registry_survival, EPS)) / np.log(observed) if observed < 1 else 1.0
+    out["survival_registry_calibrated"] = np.clip(out[source_col] ** multiplier, 0, 1)
+    out["survival_registry_calibrated"] = np.minimum.accumulate(out["survival_registry_calibrated"].values)
+    return out, multiplier
+
+
 # -----------------------------
 # Plotting
 # -----------------------------
@@ -994,37 +1119,55 @@ def render_km_registry_tool():
                     if "detected_curves" in st.session_state and len(st.session_state.detected_curves) > 0:
                         st.markdown("---")
                         st.subheader("✨ Digitize")
-                        if st.button("🚀 Digitize Selected Curve", key="digitize_btn", use_container_width=True):
+                        treatment_names = st.text_input(
+                            "Treatment labels for separate curves (comma-separated)",
+                            value="Treatment A, Treatment B",
+                            key="digitize_treatment_labels",
+                            help="When multiple curves are detected, the first labels are assigned to the selected curves in detection order."
+                        )
+                        digitize_both = st.checkbox(
+                            "Extract two treatment curves separately",
+                            value=len(st.session_state.detected_curves) >= 2,
+                            key="digitize_two_curves"
+                        )
+                        if st.button("🚀 Digitize Selected Curve(s)", key="digitize_btn", use_container_width=True):
                             with st.spinner("Digitizing curve..."):
                                 try:
-                                    selected_idx = st.session_state.get("selected_curve_idx", 0)
-                                    
-                                    digitized_points = extract_km_points_from_image(
-                                        st.session_state.image_array,
-                                        time_min=time_min,
-                                        time_max=time_max,
-                                        survival_min=survival_min,
-                                        survival_max=survival_max,
-                                        curve_index=selected_idx
-                                    )
-                                    
-                                    if digitized_points is not None and isinstance(digitized_points, pd.DataFrame) and len(digitized_points) > 0:
-                                        st.success(f"✅ Extracted {len(digitized_points)} KM points!")
+                                    labels = [x.strip() for x in treatment_names.split(",") if x.strip()]
+                                    if digitize_both:
+                                        curve_indices = list(range(min(2, len(st.session_state.detected_curves))))
+                                    else:
+                                        curve_indices = [st.session_state.get("selected_curve_idx", 0)]
+                                    frames = []
+                                    for pos, selected_idx in enumerate(curve_indices):
+                                        points = extract_km_points_from_image(
+                                            st.session_state.image_array,
+                                            time_min=time_min,
+                                            time_max=time_max,
+                                            survival_min=survival_min,
+                                            survival_max=survival_max,
+                                            curve_index=selected_idx
+                                        )
+                                        if points is not None and len(points) > 0:
+                                            points = points.copy()
+                                            points["treatment"] = labels[pos] if pos < len(labels) else f"Treatment {pos + 1}"
+                                            points["curve_index"] = selected_idx + 1
+                                            frames.append(points)
+                                    if frames:
+                                        digitized_points = pd.concat(frames, ignore_index=True)
+                                        st.success(f"✅ Extracted {len(frames)} separate curve(s) and {len(digitized_points)} KM points!")
                                         st.dataframe(digitized_points, use_container_width=True)
-                                        
-                                        # Store in session for later use
                                         st.session_state.auto_digitized_points = digitized_points
-                                        
-                                        # Download option
+                                        st.session_state.auto_digitized_by_treatment = {name: grp[["time", "survival"]].copy() for name, grp in digitized_points.groupby("treatment")}
                                         st.download_button(
                                             "📥 Download Extracted Points as CSV",
                                             data=digitized_points.to_csv(index=False),
-                                            file_name="auto_digitized_km_points.csv",
+                                            file_name="auto_digitized_km_points_by_treatment.csv",
                                             mime="text/csv",
                                             key="download_auto_digitized"
                                         )
                                     else:
-                                        st.error("❌ Could not extract points from selected curve.")
+                                        st.error("❌ Could not extract points from selected curve(s).")
                                 except Exception as e:
                                     st.error(f"❌ Error during digitization: {str(e)}")
                                 
@@ -1049,28 +1192,36 @@ def render_km_registry_tool():
         else:
             raw_km = pd.read_csv(km_file)
 
-    st.subheader("1. Manual KM curve editing")
+    if "treatment" in raw_km.columns:
+        treatments = list(raw_km["treatment"].dropna().astype(str).unique())
+        selected_treatment = st.selectbox("Treatment curve to edit and fit", treatments, key="selected_treatment_curve")
+        raw_km = raw_km[raw_km["treatment"].astype(str) == selected_treatment][["time", "survival"]].copy()
+        st.caption(f"Showing separate extraction for: {selected_treatment}")
 
-    km_prepared = prepare_km_points(raw_km)
+    work_col, board_col = st.columns([0.58, 0.42], gap="large")
+    with work_col:
+        st.subheader("1. Manual KM curve editing")
 
-    edited = st.data_editor(
+        km_prepared = prepare_km_points(raw_km)
+
+        edited = st.data_editor(
         km_prepared[["time", "survival"]],
         num_rows="dynamic",
         use_container_width=True,
         key="km_curve_editor"
     )
 
-    km_clean = prepare_km_points(edited)
+        km_clean = prepare_km_points(edited)
 
-    st.write("Edited and monotone-adjusted KM points")
-    st.dataframe(km_clean, use_container_width=True)
+        st.write("Edited and monotone-adjusted KM points")
+        st.dataframe(km_clean, use_container_width=True)
 
-    st.subheader("2. Derived interval probabilities from KM")
+        st.subheader("2. Derived interval probabilities from KM")
 
-    interval_df = derive_interval_probabilities(km_clean)
-    st.dataframe(interval_df, use_container_width=True)
+        interval_df = derive_interval_probabilities(km_clean)
+        st.dataframe(interval_df, use_container_width=True)
 
-    st.download_button(
+        st.download_button(
         "Download KM interval probabilities",
         data=interval_df.to_csv(index=False),
         file_name="km_interval_probabilities.csv",
@@ -1112,6 +1263,30 @@ def render_km_registry_tool():
 
     st.latex(r"S(t)=\exp\left[-\left(\frac{t}{\lambda}\right)^\gamma\right]")
     st.latex(r"h(t)=\frac{\gamma}{\lambda}\left(\frac{t}{\lambda}\right)^{\gamma-1}")
+
+    selected_distributions = st.multiselect(
+        "Fit additional distributions",
+        options=["Exponential", "Weibull", "Log-normal", "Log-logistic"],
+        default=["Exponential", "Weibull", "Log-normal", "Log-logistic"],
+        help="Fits distributions directly to the edited KM points and reports approximate standard errors."
+    )
+    fitted_parametric, parametric_fit_table = fit_parametric_models_to_km(km_clean, selected_distributions)
+
+    with board_col:
+        st.markdown(
+            "<div style='background:white; color:#111; padding:1rem; border:1px solid #ddd; border-radius:0.5rem;'>"
+            "<h3>White board: digitization details and parametric fits</h3>",
+            unsafe_allow_html=True,
+        )
+        st.write("**Digitized/edited curve details**")
+        st.metric("KM points", len(km_clean))
+        st.metric("Last observed time", f"{km_clean['time'].max():.2f}")
+        st.metric("Last survival", f"{km_clean['survival_monotone'].iloc[-1]:.3f}")
+        st.write("**Multiple distribution fits with approximate SEs**")
+        st.dataframe(parametric_fit_table, use_container_width=True)
+        st.write("**Formulas**")
+        st.table(pd.DataFrame({"distribution": selected_distributions, "formula": [parametric_formula(d) for d in selected_distributions]}))
+        st.markdown("</div>", unsafe_allow_html=True)
 
     st.subheader("5. Background mortality and registry RR")
 
@@ -1176,6 +1351,38 @@ def render_km_registry_tool():
         bg_df = prepare_background_mortality(pd.read_csv(bg_file))
         st.write("Background mortality table")
         st.dataframe(bg_df, use_container_width=True)
+
+        bg_adjust_mode = st.selectbox(
+            "Adjust observed KM survival for background mortality",
+            options=["none", "remove_expected", "add_expected"],
+            format_func=lambda x: {
+                "none": "No direct KM adjustment",
+                "remove_expected": "Remove expected background mortality (net/excess survival)",
+                "add_expected": "Apply expected background mortality to KM survival"
+            }[x],
+            key="bg_adjust_mode"
+        )
+        if bg_adjust_mode != "none":
+            bg_adjusted = apply_background_mortality_to_km(km_clean, bg_df, start_age, mode=bg_adjust_mode)
+            st.write("Background-adjusted KM probabilities")
+            st.dataframe(bg_adjusted, use_container_width=True)
+            km_clean = bg_adjusted.copy()
+            km_clean["survival_monotone"] = km_clean["survival_bg_adjusted"]
+
+    st.subheader("Registry calibration target")
+    calibrate_to_registry = st.checkbox("Calibrate probabilities to match registry survival", value=False)
+    if calibrate_to_registry:
+        reg_col1, reg_col2 = st.columns(2)
+        with reg_col1:
+            registry_time = st.number_input("Registry target time", min_value=0.0, value=float(km_clean["time"].max()), step=1.0)
+        with reg_col2:
+            registry_survival = st.number_input("Registry survival at target time", min_value=0.0001, max_value=1.0, value=float(km_clean["survival_monotone"].iloc[-1]), step=0.01)
+        calibrated, registry_multiplier = calibrate_survival_to_registry(km_clean, registry_time, registry_survival)
+        st.info(f"Applied registry hazard calibration multiplier: {registry_multiplier:.4f}")
+        st.dataframe(calibrated, use_container_width=True)
+        km_clean = calibrated.copy()
+        km_clean["survival_monotone"] = km_clean["survival_registry_calibrated"]
+        fit = fit_weibull_to_km(km_clean)
 
     extrapolated_df = build_extrapolated_survival_table(
         km_df=km_clean,

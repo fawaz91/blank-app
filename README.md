@@ -1,19 +1,31 @@
-r# 🎈 Blank app template
+# Enhanced Survival Distribution Fitting Agent
 
-A simple Streamlit app template for you to modify!
+A Streamlit app for survival distribution fitting, Kaplan-Meier curve digitization, treatment-specific curve extraction, background mortality adjustment, registry calibration, and export-ready survival formulas/probabilities.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+## View the app
 
-### How to run it on your own machine
+This repository does not currently contain a verified production deployment URL. The previous template badge pointed to the generic Streamlit blank-app template, not this customized KM registry app.
 
-1. Install the requirements
+To view the latest committed changes, deploy this repository to Streamlit Community Cloud or run it locally.
 
-   ```
-   $ pip install -r requirements.txt
-   ```
+### Run locally
 
-2. Run the app
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
 
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+Then open `http://localhost:8501`.
+
+### Deploy on Streamlit Community Cloud
+
+1. Push this repository and branch to GitHub.
+2. Open https://share.streamlit.io.
+3. Create or edit the app deployment.
+4. Select this repository and the branch containing the latest commits.
+5. Set the main file to `streamlit_app.py`.
+6. Set the requirements file to `requirements.txt`.
+7. Use Python 3.11, which is also declared in `runtime.txt` for deployment compatibility.
+8. Reboot or redeploy the app.
+
+After deployment, use the sidebar selector and choose **KM Registry Mortality** to see the new KM digitization, registry calibration, and parametric fitting workflow.
