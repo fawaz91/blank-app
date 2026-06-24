@@ -866,9 +866,10 @@ if KM_REGISTRY_AVAILABLE:
             horizontal=False,
             help="Choose between parametric survival distribution fitting or KM digitization with registry mortality adjustment"
         )
-        if tool == "KM Registry Mortality":
-            render_km_registry_tool()
-            st.stop()
+
+    if tool == "KM Registry Mortality":
+        render_km_registry_tool()
+        st.stop()
 
 st.markdown(
     """
