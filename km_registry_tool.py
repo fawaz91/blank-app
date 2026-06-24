@@ -705,7 +705,7 @@ def render_km_registry_tool():
                     image_array = np.array(image)
                     
                     # Display uploaded image
-                    st.image(image, caption="Uploaded KM plot", use_container_width=True)
+                    st.image(image, caption="Uploaded KM plot")
                     
                     # Axis parameter input
                     col1, col2 = st.columns(2)
