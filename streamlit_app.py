@@ -32,6 +32,12 @@ from lifelines import (
     GeneralizedGammaFitter,
 )
 
+try:
+    from km_registry_tool import render_km_registry_tool
+    KM_REGISTRY_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    KM_REGISTRY_AVAILABLE = False
+
 warnings.filterwarnings("ignore")
 
 
@@ -849,6 +855,20 @@ def sample_risk_table():
 # -----------------------------
 
 st.set_page_config(page_title="Enhanced Survival Distribution Fitting Agent", page_icon="🧬", layout="wide")
+
+# Tool selector (only if KM Registry module is available)
+if KM_REGISTRY_AVAILABLE:
+    with st.sidebar:
+        st.markdown("---")
+        tool = st.radio(
+            "📊 Select Tool:",
+            ["Survival Fitting", "KM Registry Mortality"],
+            horizontal=False,
+            help="Choose between parametric survival distribution fitting or KM digitization with registry mortality adjustment"
+        )
+        if tool == "KM Registry Mortality":
+            render_km_registry_tool()
+            st.stop()
 
 st.markdown(
     """
