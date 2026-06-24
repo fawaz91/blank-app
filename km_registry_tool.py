@@ -179,6 +179,72 @@ def visualize_curves_on_image(image_array, curves, selected_index=0):
         return image_array
 
 
+def detect_marked_curve(image_array, marking_color_rgb, tolerance=30):
+    """
+    Detects which curve was marked with a specific color.
+    
+    Args:
+        image_array: Original image (RGB)
+        marking_color_rgb: Tuple (R, G, B) of the marking color (0-255)
+        tolerance: Color tolerance for detection (0-255)
+    
+    Returns:
+        Index of the curve closest to the marked region, or None
+    """
+    try:
+        # Convert to RGB if needed
+        if len(image_array.shape) == 2:
+            return None
+        
+        # Get image in RGB format
+        img_rgb = image_array.astype(np.uint8)
+        
+        # Create a mask for the marking color
+        lower_bound = np.array([max(0, c - tolerance) for c in marking_color_rgb], dtype=np.uint8)
+        upper_bound = np.array([min(255, c + tolerance) for c in marking_color_rgb], dtype=np.uint8)
+        
+        # Find pixels matching the marking color
+        mask = cv2.inRange(img_rgb, lower_bound, upper_bound)
+        
+        if mask.sum() == 0:
+            return None
+        
+        # Find contours of the marked region
+        marked_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not marked_contours:
+            return None
+        
+        # Get centroid of marked region
+        marked_points = np.vstack([c.squeeze() for c in marked_contours if c.squeeze().ndim > 1])
+        if len(marked_points) == 0:
+            return None
+        
+        marked_centroid = marked_points.mean(axis=0)
+        
+        # Detect all curves
+        curves = detect_multiple_curves(image_array)
+        if curves is None:
+            return None
+        
+        # Find which curve is closest to the marked region
+        min_distance = float('inf')
+        closest_curve_idx = 0
+        
+        for i, curve_info in enumerate(curves):
+            curve_centroid = curve_info['points'].mean(axis=0)
+            distance = np.linalg.norm(marked_centroid - curve_centroid)
+            
+            if distance < min_distance:
+                min_distance = distance
+                closest_curve_idx = i
+        
+        return closest_curve_idx
+        
+    except Exception as e:
+        return None
+
+
 def detect_axes(image_array, curve_points=None):
     """
     Detects axis ranges from the image.
@@ -825,42 +891,110 @@ def render_km_registry_tool():
                         survival_min = st.number_input("Survival minimum", value=0.0, min_value=0.0, max_value=1.0, key="surv_min")
                         survival_max = st.number_input("Survival maximum", value=1.0, min_value=0.0, max_value=1.0, key="surv_max")
                     
-                    if st.button("🔍 Detect Curves", key="detect_curves_btn"):
-                        with st.spinner("Detecting curves..."):
-                            curves = detect_multiple_curves(image_array)
-                            
-                            if curves is not None and len(curves) > 0:
-                                st.success(f"✅ Detected {len(curves)} curve(s)!")
+                    st.markdown("---")
+                    
+                    # Create two detection methods
+                    col_method1, col_method2 = st.columns(2)
+                    
+                    with col_method1:
+                        st.subheader("🔍 Method 1: Auto-Detect")
+                        st.write("Automatically detect all curves in the image")
+                        if st.button("Detect All Curves", key="detect_curves_btn", use_container_width=True):
+                            with st.spinner("Detecting curves..."):
+                                curves = detect_multiple_curves(image_array)
                                 
-                                # Store curves in session
-                                st.session_state.detected_curves = curves
-                                st.session_state.image_array = image_array
-                                
-                                if len(curves) == 1:
-                                    st.info("Single curve detected. Ready to digitize.")
-                                    selected_curve_idx = 0
+                                if curves is not None and len(curves) > 0:
+                                    st.success(f"✅ Detected {len(curves)} curve(s)!")
+                                    
+                                    # Store curves in session
+                                    st.session_state.detected_curves = curves
+                                    st.session_state.image_array = image_array
+                                    st.session_state.detection_method = "auto"
+                                    
+                                    if len(curves) == 1:
+                                        st.info("Single curve detected. Ready to digitize.")
+                                        st.session_state.selected_curve_idx = 0
+                                    else:
+                                        st.subheader("📊 Select which curve to digitize:")
+                                        
+                                        # Create visualization with all curves
+                                        viz_img = visualize_curves_on_image(image_array, curves, selected_index=0)
+                                        st.image(viz_img, caption="Detected curves (Green=selected, Red=others)")
+                                        
+                                        # Let user select curve
+                                        curve_labels = [f"Curve {i+1} (Area: {c['area']:.0f})" for i, c in enumerate(curves)]
+                                        selected_curve_idx = st.radio("Choose curve to digitize:", range(len(curves)), format_func=lambda i: curve_labels[i], key="auto_curve_select")
+                                        
+                                        # Update visualization
+                                        viz_img = visualize_curves_on_image(image_array, curves, selected_index=selected_curve_idx)
+                                        st.image(viz_img, caption=f"Selected: {curve_labels[selected_curve_idx]}")
+                                        
+                                        st.session_state.selected_curve_idx = selected_curve_idx
                                 else:
-                                    st.subheader("📊 Select which curve to digitize:")
-                                    
-                                    # Create visualization with all curves
-                                    viz_img = visualize_curves_on_image(image_array, curves, selected_index=0)
-                                    st.image(viz_img, caption="Detected curves (Green=selected, Red=others)")
-                                    
-                                    # Let user select curve
-                                    curve_labels = [f"Curve {i+1} (Area: {c['area']:.0f})" for i, c in enumerate(curves)]
-                                    selected_curve_idx = st.radio("Choose curve to digitize:", range(len(curves)), format_func=lambda i: curve_labels[i])
-                                    
-                                    # Update visualization
-                                    viz_img = visualize_curves_on_image(image_array, curves, selected_index=selected_curve_idx)
-                                    st.image(viz_img, caption=f"Selected: {curve_labels[selected_curve_idx]}")
+                                    st.error("❌ Could not detect any curves. Try Method 2 (Manual Color Marking).")
+                    
+                    with col_method2:
+                        st.subheader("🎨 Method 2: Manual Marking")
+                        st.write("Mark the curve with a color, then detect it")
+                        
+                        # Color picker
+                        marking_color = st.color_picker(
+                            "Pick the color you used to mark your curve:",
+                            value="#00FF00",
+                            key="marking_color_picker"
+                        )
+                        
+                        # Convert hex to RGB
+                        marking_color_rgb = tuple(int(marking_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+                        
+                        # Tolerance slider
+                        color_tolerance = st.slider(
+                            "Color tolerance (higher = more flexible):",
+                            min_value=5,
+                            max_value=100,
+                            value=30,
+                            step=5,
+                            key="color_tolerance"
+                        )
+                        
+                        st.info("""
+                        **Instructions:**
+                        1. Highlight or mark the curve you want to digitize with the selected color
+                        2. Re-upload the marked image
+                        3. Click "Detect by Color" to automatically identify your marked curve
+                        """)
+                        
+                        if st.button("🎯 Detect by Color Mark", key="detect_by_color_btn", use_container_width=True):
+                            with st.spinner("Detecting marked curve..."):
+                                # First get all curves
+                                curves = detect_multiple_curves(image_array)
                                 
-                                st.session_state.selected_curve_idx = selected_curve_idx
-                            else:
-                                st.error("❌ Could not detect any curves. Try adjusting axis parameters or uploading a clearer image.")
+                                if curves is not None and len(curves) > 0:
+                                    # Find which curve was marked
+                                    marked_curve_idx = detect_marked_curve(image_array, marking_color_rgb, tolerance=color_tolerance)
+                                    
+                                    if marked_curve_idx is not None:
+                                        st.success(f"✅ Found your marked curve (Curve {marked_curve_idx + 1})!")
+                                        
+                                        # Store in session
+                                        st.session_state.detected_curves = curves
+                                        st.session_state.image_array = image_array
+                                        st.session_state.selected_curve_idx = marked_curve_idx
+                                        st.session_state.detection_method = "marked"
+                                        
+                                        # Show visualization
+                                        viz_img = visualize_curves_on_image(image_array, curves, selected_index=marked_curve_idx)
+                                        st.image(viz_img, caption=f"Auto-selected marked curve: Curve {marked_curve_idx + 1} (Green)")
+                                    else:
+                                        st.warning("⚠️ Could not find your color mark. Try adjusting the color or tolerance.")
+                                else:
+                                    st.error("❌ Could not detect any curves in the image.")
                     
                     # Show digitize button only if curves have been detected
                     if "detected_curves" in st.session_state and len(st.session_state.detected_curves) > 0:
-                        if st.button("✨ Digitize Selected Curve", key="digitize_btn"):
+                        st.markdown("---")
+                        st.subheader("✨ Digitize")
+                        if st.button("🚀 Digitize Selected Curve", key="digitize_btn", use_container_width=True):
                             with st.spinner("Digitizing curve..."):
                                 try:
                                     selected_idx = st.session_state.get("selected_curve_idx", 0)
