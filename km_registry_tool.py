@@ -83,6 +83,102 @@ def detect_curve_pixels(image_array, curve_color_range="dark"):
         return None
 
 
+def detect_multiple_curves(image_array, min_curve_length=20):
+    """
+    Detects all curves in the image and returns them sorted by area.
+    
+    Returns:
+        List of curve point arrays, or None if no curves detected
+    """
+    try:
+        preprocessed = preprocess_km_image(image_array)
+        
+        # Edge detection using Canny
+        edges = cv2.Canny(preprocessed, 50, 150)
+        
+        # Morphological operations to connect curve pixels
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        dilated = cv2.dilate(edges, kernel, iterations=1)
+        
+        # Find contours
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None
+        
+        # Filter and sort contours by area
+        valid_curves = []
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            arc_length = cv2.arcLength(contour, False)
+            
+            # Filter out very small curves and curves that are too short
+            if area > 50 and arc_length > min_curve_length:
+                points = contour.squeeze()
+                if len(points.shape) == 2 and points.shape[1] == 2 and len(points) > min_curve_length:
+                    valid_curves.append({
+                        'points': points.astype(np.float32),
+                        'area': area,
+                        'length': arc_length
+                    })
+        
+        if not valid_curves:
+            return None
+        
+        # Sort by area (descending)
+        valid_curves.sort(key=lambda x: x['area'], reverse=True)
+        return valid_curves
+        
+    except Exception as e:
+        return None
+
+
+def visualize_curves_on_image(image_array, curves, selected_index=0):
+    """
+    Creates a visualization of detected curves on the image.
+    
+    Args:
+        image_array: Original image
+        curves: List of curve dictionaries from detect_multiple_curves
+        selected_index: Index of the curve to highlight in green
+    
+    Returns:
+        numpy array of annotated image
+    """
+    try:
+        # Convert to color if grayscale
+        if len(image_array.shape) == 2:
+            display_img = cv2.cvtColor(image_array, cv2.COLOR_GRAY2BGR)
+        else:
+            display_img = image_array.copy()
+        
+        # Draw all curves
+        for i, curve_info in enumerate(curves):
+            points = curve_info['points'].astype(np.int32)
+            
+            # Selected curve in green, others in red
+            if i == selected_index:
+                color = (0, 255, 0)  # Green for selected
+                thickness = 3
+            else:
+                color = (0, 0, 255)  # Red for non-selected
+                thickness = 1
+            
+            # Draw the curve
+            cv2.polylines(display_img, [points], False, color, thickness)
+            
+            # Add curve number label
+            if len(points) > 0:
+                centroid = points.mean(axis=0).astype(np.int32)
+                cv2.putText(display_img, f"Curve {i+1}", tuple(centroid), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        
+        return display_img
+        
+    except Exception as e:
+        return image_array
+
+
 def detect_axes(image_array, curve_points=None):
     """
     Detects axis ranges from the image.
@@ -111,7 +207,7 @@ def detect_axes(image_array, curve_points=None):
 
 
 def extract_km_points_from_image(image_array, time_min=0, time_max=None, 
-                                  survival_min=0, survival_max=1):
+                                  survival_min=0, survival_max=1, curve_index=0):
     """
     Extracts KM points from image automatically.
     
@@ -119,6 +215,7 @@ def extract_km_points_from_image(image_array, time_min=0, time_max=None,
         image_array: numpy array of image
         time_min, time_max: time axis range (user provides)
         survival_min, survival_max: survival axis range
+        curve_index: which curve to extract (0=first/largest)
     
     Returns:
         DataFrame with time and survival columns, or None if extraction fails
@@ -127,8 +224,17 @@ def extract_km_points_from_image(image_array, time_min=0, time_max=None,
         if image_array is None:
             return None
         
-        # Detect curve pixels
-        curve_pixels = detect_curve_pixels(image_array)
+        # Detect all curves
+        curves = detect_multiple_curves(image_array)
+        if curves is None or len(curves) == 0:
+            return None
+        
+        # Use specified curve or first one
+        if curve_index >= len(curves):
+            curve_index = 0
+        
+        curve_pixels = curves[curve_index]['points']
+        
         if curve_pixels is None or len(curve_pixels) < 10:
             return None
         
@@ -719,36 +825,74 @@ def render_km_registry_tool():
                         survival_min = st.number_input("Survival minimum", value=0.0, min_value=0.0, max_value=1.0, key="surv_min")
                         survival_max = st.number_input("Survival maximum", value=1.0, min_value=0.0, max_value=1.0, key="surv_max")
                     
-                    if st.button("🔍 Auto-Digitize", key="auto_digitize_btn"):
-                        with st.spinner("Extracting KM curve points..."):
-                            try:
-                                digitized_points = extract_km_points_from_image(
-                                    image_array,
-                                    time_min=time_min,
-                                    time_max=time_max,
-                                    survival_min=survival_min,
-                                    survival_max=survival_max
-                                )
+                    if st.button("🔍 Detect Curves", key="detect_curves_btn"):
+                        with st.spinner("Detecting curves..."):
+                            curves = detect_multiple_curves(image_array)
+                            
+                            if curves is not None and len(curves) > 0:
+                                st.success(f"✅ Detected {len(curves)} curve(s)!")
                                 
-                                if digitized_points is not None and isinstance(digitized_points, pd.DataFrame) and len(digitized_points) > 0:
-                                    st.success(f"✅ Extracted {len(digitized_points)} KM points!")
-                                    st.dataframe(digitized_points, use_container_width=True)
-                                    
-                                    # Store in session for later use
-                                    st.session_state.auto_digitized_points = digitized_points
-                                    
-                                    # Download option
-                                    st.download_button(
-                                        "📥 Download Extracted Points as CSV",
-                                        data=digitized_points.to_csv(index=False),
-                                        file_name="auto_digitized_km_points.csv",
-                                        mime="text/csv",
-                                        key="download_auto_digitized"
-                                    )
+                                # Store curves in session
+                                st.session_state.detected_curves = curves
+                                st.session_state.image_array = image_array
+                                
+                                if len(curves) == 1:
+                                    st.info("Single curve detected. Ready to digitize.")
+                                    selected_curve_idx = 0
                                 else:
-                                    st.error("❌ Could not detect curve in image. Try adjusting axis parameters or uploading a clearer image.")
-                            except Exception as e:
-                                st.error(f"❌ Error during digitization: {str(e)}")
+                                    st.subheader("📊 Select which curve to digitize:")
+                                    
+                                    # Create visualization with all curves
+                                    viz_img = visualize_curves_on_image(image_array, curves, selected_index=0)
+                                    st.image(viz_img, caption="Detected curves (Green=selected, Red=others)")
+                                    
+                                    # Let user select curve
+                                    curve_labels = [f"Curve {i+1} (Area: {c['area']:.0f})" for i, c in enumerate(curves)]
+                                    selected_curve_idx = st.radio("Choose curve to digitize:", range(len(curves)), format_func=lambda i: curve_labels[i])
+                                    
+                                    # Update visualization
+                                    viz_img = visualize_curves_on_image(image_array, curves, selected_index=selected_curve_idx)
+                                    st.image(viz_img, caption=f"Selected: {curve_labels[selected_curve_idx]}")
+                                
+                                st.session_state.selected_curve_idx = selected_curve_idx
+                            else:
+                                st.error("❌ Could not detect any curves. Try adjusting axis parameters or uploading a clearer image.")
+                    
+                    # Show digitize button only if curves have been detected
+                    if "detected_curves" in st.session_state and len(st.session_state.detected_curves) > 0:
+                        if st.button("✨ Digitize Selected Curve", key="digitize_btn"):
+                            with st.spinner("Digitizing curve..."):
+                                try:
+                                    selected_idx = st.session_state.get("selected_curve_idx", 0)
+                                    
+                                    digitized_points = extract_km_points_from_image(
+                                        st.session_state.image_array,
+                                        time_min=time_min,
+                                        time_max=time_max,
+                                        survival_min=survival_min,
+                                        survival_max=survival_max,
+                                        curve_index=selected_idx
+                                    )
+                                    
+                                    if digitized_points is not None and isinstance(digitized_points, pd.DataFrame) and len(digitized_points) > 0:
+                                        st.success(f"✅ Extracted {len(digitized_points)} KM points!")
+                                        st.dataframe(digitized_points, use_container_width=True)
+                                        
+                                        # Store in session for later use
+                                        st.session_state.auto_digitized_points = digitized_points
+                                        
+                                        # Download option
+                                        st.download_button(
+                                            "📥 Download Extracted Points as CSV",
+                                            data=digitized_points.to_csv(index=False),
+                                            file_name="auto_digitized_km_points.csv",
+                                            mime="text/csv",
+                                            key="download_auto_digitized"
+                                        )
+                                    else:
+                                        st.error("❌ Could not extract points from selected curve.")
+                                except Exception as e:
+                                    st.error(f"❌ Error during digitization: {str(e)}")
                                 
                 except Exception as e:
                     st.error(f"❌ Error loading image: {str(e)}")
