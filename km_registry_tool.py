@@ -18,6 +18,16 @@ try:
 except ImportError:
     IMAGE_PROCESSING_AVAILABLE = False
 
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OpenAI = None
+    OPENAI_AVAILABLE = False
+
+import base64
+import json
+import os
 import io
 
 EPS = 1e-12
@@ -362,6 +372,110 @@ def extract_km_points_from_image(image_array, time_min=0, time_max=None,
         
     except Exception as e:
         return None
+
+
+
+
+# ==============================
+# CHATGPT-ASSISTED IMAGE DIGITIZATION
+# ==============================
+
+def get_openai_api_key():
+    """Return an OpenAI API key from Streamlit secrets or environment variables."""
+    try:
+        if "OPENAI_API_KEY" in st.secrets:
+            return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        pass
+    return os.getenv("OPENAI_API_KEY")
+
+
+def image_file_to_data_url(uploaded_file):
+    """Convert an uploaded Streamlit image file to a data URL for the OpenAI API."""
+    image_bytes = uploaded_file.getvalue()
+    mime_type = getattr(uploaded_file, "type", None) or "image/png"
+    encoded = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def extract_json_object(text):
+    """Extract a JSON object from a model response that may include markdown fences."""
+    if not text:
+        raise ValueError("ChatGPT returned an empty response.")
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`")
+        if cleaned.lower().startswith("json"):
+            cleaned = cleaned[4:].strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError("ChatGPT response did not contain a JSON object.")
+    return json.loads(cleaned[start:end + 1])
+
+
+def digitize_km_with_chatgpt(uploaded_file, user_command, time_min, time_max, survival_min, survival_max, model="gpt-4.1"):
+    """
+    Ask ChatGPT vision to digitize KM curve points from an uploaded image.
+
+    Returns a tuple of (points_df, raw_json_dict).
+    """
+    if not OPENAI_AVAILABLE:
+        raise RuntimeError("The openai Python package is not installed. Add openai to requirements.txt and redeploy.")
+
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured. Add it to Streamlit secrets or the app environment.")
+
+    client = OpenAI(api_key=api_key)
+    data_url = image_file_to_data_url(uploaded_file)
+    schema_instruction = f"""
+You are digitizing a Kaplan-Meier plot image for health-economic survival modeling.
+Follow the user's command exactly, including which treatment arm/color/line style to digitize.
+Use the axis bounds below unless the user's command explicitly overrides them:
+- time_min={time_min}
+- time_max={time_max}
+- survival_min={survival_min}
+- survival_max={survival_max}
+Return only valid JSON with this shape:
+{{
+  "points": [{{"time": 0.0, "survival": 1.0}}, ...],
+  "treatment": "short label for the digitized curve",
+  "notes": "brief uncertainty notes"
+}}
+Rules:
+- survival must be a proportion between 0 and 1, not percent.
+- Include the origin if the curve starts at 100% survival.
+- Prefer 15 to 60 clinically meaningful step/corner points rather than hundreds of pixels.
+- Preserve non-increasing KM survival as much as possible.
+"""
+    response = client.responses.create(
+        model=model,
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": schema_instruction + "\nUser command:\n" + user_command},
+                {"type": "input_image", "image_url": data_url},
+            ],
+        }],
+        temperature=0,
+    )
+    raw_text = response.output_text
+    payload = extract_json_object(raw_text)
+    points = pd.DataFrame(payload.get("points", []))
+    if points.empty or not {"time", "survival"}.issubset(points.columns):
+        raise ValueError("ChatGPT did not return any valid points with time and survival columns.")
+    points = points[["time", "survival"]].copy()
+    points["time"] = pd.to_numeric(points["time"], errors="coerce")
+    points["survival"] = pd.to_numeric(points["survival"], errors="coerce")
+    points = points.dropna()
+    points["time"] = points["time"].clip(lower=float(time_min), upper=float(time_max))
+    points["survival"] = points["survival"].clip(lower=float(survival_min), upper=float(survival_max))
+    points = points.sort_values("time").drop_duplicates("time").reset_index(drop=True)
+    treatment = str(payload.get("treatment") or "ChatGPT digitized curve").strip()
+    points["treatment"] = treatment
+    points["source"] = "chatgpt_image_digitization"
+    return points, payload
 
 
 # -----
@@ -970,18 +1084,98 @@ def render_km_registry_tool():
     and apply background mortality plus registry mortality RR to extrapolated survival.
     """)
 
-    # Add tabs for manual upload or automatic digitization
+    # Add tabs for manual upload, ChatGPT-assisted digitization, or automatic OpenCV digitization
+    tabs_list = ["📤 Manual CSV Upload", "💬 ChatGPT Image Digitization"]
     if IMAGE_PROCESSING_AVAILABLE:
-        tabs_list = ["📤 Manual CSV Upload", "🤖 Auto-Digitize from Image"]
-    else:
-        tabs_list = ["📤 Manual CSV Upload"]
-    
-    if len(tabs_list) == 2:
-        tab1, tab2 = st.tabs(tabs_list)
-    else:
-        tab1 = st.tabs(tabs_list)[0]
-        tab2 = None
-    
+        tabs_list.append("🤖 Auto-Digitize from Image")
+
+    tabs = st.tabs(tabs_list)
+    tab1 = tabs[0]
+    tab_chatgpt = tabs[1]
+    tab2 = tabs[2] if len(tabs) > 2 else None
+
+    with tab_chatgpt:
+        st.subheader("Digitize directly with ChatGPT")
+        st.markdown(
+            "Upload a KM plot image and tell ChatGPT exactly which curve to digitize. "
+            "This bypasses the built-in OpenCV digitizer and uses your written command plus the image."
+        )
+        if not OPENAI_AVAILABLE:
+            st.warning("The OpenAI Python package is not installed yet. Add `openai` to requirements.txt and redeploy.")
+        elif not get_openai_api_key():
+            st.warning("Set `OPENAI_API_KEY` in Streamlit secrets or the deployment environment to enable ChatGPT digitization.")
+
+        chatgpt_image_file = st.file_uploader(
+            "Upload KM plot image for ChatGPT",
+            type=["png", "jpg", "jpeg", "bmp", "webp"],
+            key="chatgpt_km_image_file"
+        )
+        chat_col1, chat_col2 = st.columns(2)
+        with chat_col1:
+            st.subheader("X-Axis (Time)")
+            chat_time_min = st.number_input("ChatGPT time minimum", value=0.0, key="chat_time_min")
+            chat_time_max = st.number_input("ChatGPT time maximum", value=10.0, key="chat_time_max")
+        with chat_col2:
+            st.subheader("Y-Axis (Survival)")
+            chat_survival_min = st.number_input("ChatGPT survival minimum", value=0.0, min_value=0.0, max_value=1.0, key="chat_surv_min")
+            chat_survival_max = st.number_input("ChatGPT survival maximum", value=1.0, min_value=0.0, max_value=1.0, key="chat_surv_max")
+
+        chatgpt_command = st.text_area(
+            "Command for ChatGPT",
+            value=(
+                "Digitize the main Kaplan-Meier curve from this image. "
+                "Use the specified axes, return time and survival proportions, and ignore grid lines, censor marks, legends, and at-risk tables."
+            ),
+            height=120,
+            key="chatgpt_digitization_command",
+            help="Example: Digitize only the blue pembrolizumab curve; ignore the red placebo curve and censor marks."
+        )
+        chatgpt_model = st.text_input(
+            "OpenAI model",
+            value="gpt-4.1",
+            key="chatgpt_digitization_model",
+            help="Use a vision-capable OpenAI model available to your API key."
+        )
+
+        if chatgpt_image_file is not None:
+            try:
+                image = Image.open(chatgpt_image_file) if IMAGE_PROCESSING_AVAILABLE else None
+                if image is not None:
+                    st.image(image, caption="Uploaded KM plot for ChatGPT")
+            except Exception:
+                pass
+
+        if st.button("💬 Digitize with ChatGPT", key="chatgpt_digitize_btn", use_container_width=True):
+            if chatgpt_image_file is None:
+                st.error("Upload a KM plot image first.")
+            else:
+                try:
+                    with st.spinner("Asking ChatGPT to digitize the uploaded image..."):
+                        chatgpt_points, chatgpt_payload = digitize_km_with_chatgpt(
+                            uploaded_file=chatgpt_image_file,
+                            user_command=chatgpt_command,
+                            time_min=chat_time_min,
+                            time_max=chat_time_max,
+                            survival_min=chat_survival_min,
+                            survival_max=chat_survival_max,
+                            model=chatgpt_model.strip() or "gpt-4.1",
+                        )
+                    st.success(f"✅ ChatGPT extracted {len(chatgpt_points)} KM points.")
+                    st.dataframe(chatgpt_points, use_container_width=True)
+                    if chatgpt_payload.get("notes"):
+                        st.info(str(chatgpt_payload.get("notes")))
+                    st.session_state.auto_digitized_points = chatgpt_points
+                    st.session_state.chatgpt_digitized_payload = chatgpt_payload
+                    st.download_button(
+                        "📥 Download ChatGPT-extracted points as CSV",
+                        data=chatgpt_points.to_csv(index=False),
+                        file_name="chatgpt_digitized_km_points.csv",
+                        mime="text/csv",
+                        key="download_chatgpt_digitized"
+                    )
+                except Exception as e:
+                    st.error(f"❌ ChatGPT digitization error: {str(e)}")
+
     if tab2 is not None:
         with tab2:
             st.subheader("Automatic KM Curve Digitization")
