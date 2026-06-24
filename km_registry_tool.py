@@ -705,7 +705,7 @@ def render_km_registry_tool():
                     image_array = np.array(image)
                     
                     # Display uploaded image
-                    st.image(image, caption="Uploaded KM plot", use_column_width=True)
+                    st.image(image, caption="Uploaded KM plot", use_container_width=True)
                     
                     # Axis parameter input
                     col1, col2 = st.columns(2)
@@ -732,7 +732,7 @@ def render_km_registry_tool():
                                 
                                 if digitized_points is not None and isinstance(digitized_points, pd.DataFrame) and len(digitized_points) > 0:
                                     st.success(f"✅ Extracted {len(digitized_points)} KM points!")
-                                    st.dataframe(digitized_points, use_column_width=True)
+                                    st.dataframe(digitized_points, use_container_width=True)
                                     
                                     # Store in session for later use
                                     st.session_state.auto_digitized_points = digitized_points
