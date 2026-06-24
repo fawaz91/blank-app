@@ -14,7 +14,6 @@ from scipy.optimize import minimize
 try:
     import cv2
     from PIL import Image
-    from skimage import edge, morphology
     IMAGE_PROCESSING_AVAILABLE = True
 except ImportError:
     IMAGE_PROCESSING_AVAILABLE = False
@@ -50,30 +49,38 @@ def detect_curve_pixels(image_array, curve_color_range="dark"):
     Detects curve pixels using edge detection and filtering.
     curve_color_range: "dark" or "light"
     """
-    preprocessed = preprocess_km_image(image_array)
-    
-    # Edge detection using Canny
-    edges = cv2.Canny(preprocessed, 50, 150)
-    
-    # Morphological operations to connect curve pixels
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    dilated = cv2.dilate(edges, kernel, iterations=1)
-    
-    # Find contours
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    if not contours:
+    try:
+        preprocessed = preprocess_km_image(image_array)
+        
+        # Edge detection using Canny
+        edges = cv2.Canny(preprocessed, 50, 150)
+        
+        # Morphological operations to connect curve pixels
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        dilated = cv2.dilate(edges, kernel, iterations=1)
+        
+        # Find contours
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None
+        
+        # Get the longest contour (main curve)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Extract points from contour
+        points = largest_contour.squeeze()
+        if len(points.shape) == 1:
+            # Single point, reshape
+            return None
+        
+        # Ensure points is 2D
+        if len(points.shape) != 2 or points.shape[1] != 2:
+            return None
+            
+        return points.astype(np.float32)
+    except Exception as e:
         return None
-    
-    # Get the longest contour (main curve)
-    largest_contour = max(contours, key=cv2.contourArea)
-    
-    # Extract points from contour
-    points = largest_contour.squeeze()
-    if len(points.shape) == 1:
-        points = points.reshape(-1, 2)
-    
-    return points
 
 
 def detect_axes(image_array, curve_points=None):
@@ -114,54 +121,75 @@ def extract_km_points_from_image(image_array, time_min=0, time_max=None,
         survival_min, survival_max: survival axis range
     
     Returns:
-        DataFrame with time and survival columns
+        DataFrame with time and survival columns, or None if extraction fails
     """
-    # Detect curve pixels
-    curve_pixels = detect_curve_pixels(image_array)
-    if curve_pixels is None or len(curve_pixels) < 10:
+    try:
+        if image_array is None:
+            return None
+        
+        # Detect curve pixels
+        curve_pixels = detect_curve_pixels(image_array)
+        if curve_pixels is None or len(curve_pixels) < 10:
+            return None
+        
+        # Detect axes
+        axes_info = detect_axes(image_array, curve_pixels)
+        
+        # Convert pixel coordinates to data coordinates
+        px_x = curve_pixels[:, 0].astype(float)
+        px_y = curve_pixels[:, 1].astype(float)
+        
+        # Map pixels to data space
+        x_pixel_range = axes_info["pixel_x_max"] - axes_info["pixel_x_min"]
+        y_pixel_range = axes_info["pixel_y_max"] - axes_info["pixel_y_min"]
+        
+        # Avoid division by zero
+        if x_pixel_range <= 0 or y_pixel_range <= 0:
+            return None
+        
+        # Set time_max if not provided
+        if time_max is None:
+            time_max = 100.0
+        
+        # Convert to data coordinates
+        time = time_min + (px_x - axes_info["pixel_x_min"]) / x_pixel_range * (time_max - time_min)
+        # Y-axis is inverted in image coordinates
+        survival = survival_max - (px_y - axes_info["pixel_y_min"]) / y_pixel_range * (survival_max - survival_min)
+        
+        # Create DataFrame
+        df = pd.DataFrame({
+            "time": time,
+            "survival": survival
+        })
+        
+        # Remove any NaN or infinite values
+        df = df.replace([np.inf, -np.inf], np.nan).dropna()
+        
+        if len(df) == 0:
+            return None
+        
+        # Filter to valid ranges
+        df = df[(df["survival"] >= survival_min - 0.1) & (df["survival"] <= survival_max + 0.1)]
+        df = df[df["time"] >= time_min - 0.1]
+        
+        if len(df) == 0:
+            return None
+        
+        # Clip to valid ranges
+        df["survival"] = df["survival"].clip(survival_min, survival_max)
+        df["time"] = df["time"].clip(time_min, None)
+        
+        # Remove duplicates and sort
+        df = df.drop_duplicates().sort_values("time").reset_index(drop=True)
+        
+        # Subsample points for smoothness (keep every Nth point)
+        if len(df) > 50:
+            df = df.iloc[::len(df)//50].reset_index(drop=True)
+        
+        return df if len(df) > 0 else None
+        
+    except Exception as e:
         return None
-    
-    # Detect axes
-    axes_info = detect_axes(image_array, curve_pixels)
-    
-    # Convert pixel coordinates to data coordinates
-    px_x = curve_pixels[:, 0]
-    px_y = curve_pixels[:, 1]
-    
-    # Map pixels to data space
-    # x-axis: left to right (pixel) = time_min to time_max (data)
-    # y-axis: bottom to top (pixel) = survival_min to survival_max (data)
-    
-    x_pixel_range = axes_info["pixel_x_max"] - axes_info["pixel_x_min"]
-    y_pixel_range = axes_info["pixel_y_max"] - axes_info["pixel_y_min"]
-    
-    # Avoid division by zero
-    if x_pixel_range == 0 or y_pixel_range == 0:
-        return None
-    
-    # Convert to data coordinates
-    time = time_min + (px_x - axes_info["pixel_x_min"]) / x_pixel_range * (time_max - time_min if time_max else 100)
-    # Y-axis is inverted in image coordinates
-    survival = survival_max - (px_y - axes_info["pixel_y_min"]) / y_pixel_range * (survival_max - survival_min)
-    
-    # Create DataFrame
-    df = pd.DataFrame({
-        "time": time,
-        "survival": survival
-    })
-    
-    # Filter to valid ranges
-    df = df[(df["survival"] >= survival_min) & (df["survival"] <= survival_max)]
-    df = df[df["time"] >= time_min]
-    
-    # Remove duplicates and sort
-    df = df.drop_duplicates().sort_values("time")
-    
-    # Subsample points for smoothness (keep every Nth point)
-    if len(df) > 50:
-        df = df.iloc[::len(df)//50]
-    
-    return df
 
 
 # -----
@@ -646,67 +674,84 @@ def render_km_registry_tool():
     """)
 
     # Add tabs for manual upload or automatic digitization
-    tab1, tab2 = st.tabs(["📤 Manual CSV Upload", "🤖 Auto-Digitize from Image"])
+    if IMAGE_PROCESSING_AVAILABLE:
+        tabs_list = ["📤 Manual CSV Upload", "🤖 Auto-Digitize from Image"]
+    else:
+        tabs_list = ["📤 Manual CSV Upload"]
     
-    with tab2:
-        st.subheader("Automatic KM Curve Digitization")
-        st.markdown("""
-        Upload a KM plot image and the digitizer will automatically extract curve points.
-        """)
-        
-        image_file = st.file_uploader(
-            "Upload KM plot image (PNG, JPG, etc.)",
-            type=["png", "jpg", "jpeg", "bmp"],
-            key="km_image_file"
-        )
-        
-        if image_file is not None:
-            # Load image
-            image = Image.open(image_file)
-            image_array = np.array(image)
+    if len(tabs_list) == 2:
+        tab1, tab2 = st.tabs(tabs_list)
+    else:
+        tab1 = st.tabs(tabs_list)[0]
+        tab2 = None
+    
+    if tab2 is not None:
+        with tab2:
+            st.subheader("Automatic KM Curve Digitization")
+            st.markdown("""
+            Upload a KM plot image and the digitizer will automatically extract curve points.
+            """)
             
-            # Display uploaded image
-            st.image(image, caption="Uploaded KM plot", use_column_width=True)
+            image_file = st.file_uploader(
+                "Upload KM plot image (PNG, JPG, etc.)",
+                type=["png", "jpg", "jpeg", "bmp"],
+                key="km_image_file"
+            )
             
-            # Axis parameter input
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("X-Axis (Time)")
-                time_min = st.number_input("Time minimum", value=0.0, key="time_min")
-                time_max = st.number_input("Time maximum", value=10.0, key="time_max")
-            
-            with col2:
-                st.subheader("Y-Axis (Survival)")
-                survival_min = st.number_input("Survival minimum", value=0.0, min_value=0.0, max_value=1.0, key="surv_min")
-                survival_max = st.number_input("Survival maximum", value=1.0, min_value=0.0, max_value=1.0, key="surv_max")
-            
-            if st.button("🔍 Auto-Digitize", key="auto_digitize_btn"):
-                with st.spinner("Extracting KM curve points..."):
-                    digitized_points = extract_km_points_from_image(
-                        image_array,
-                        time_min=time_min,
-                        time_max=time_max,
-                        survival_min=survival_min,
-                        survival_max=survival_max
-                    )
+            if image_file is not None:
+                try:
+                    # Load image
+                    image = Image.open(image_file)
+                    image_array = np.array(image)
                     
-                    if digitized_points is not None and len(digitized_points) > 0:
-                        st.success(f"✅ Extracted {len(digitized_points)} KM points!")
-                        st.dataframe(digitized_points, use_column_width=True)
-                        
-                        # Store in session for later use
-                        st.session_state.auto_digitized_points = digitized_points
-                        
-                        # Download option
-                        st.download_button(
-                            "📥 Download Extracted Points as CSV",
-                            data=digitized_points.to_csv(index=False),
-                            file_name="auto_digitized_km_points.csv",
-                            mime="text/csv",
-                            key="download_auto_digitized"
-                        )
-                    else:
-                        st.error("❌ Could not detect curve in image. Try adjusting axis parameters or uploading a clearer image.")
+                    # Display uploaded image
+                    st.image(image, caption="Uploaded KM plot", use_column_width=True)
+                    
+                    # Axis parameter input
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.subheader("X-Axis (Time)")
+                        time_min = st.number_input("Time minimum", value=0.0, key="time_min")
+                        time_max = st.number_input("Time maximum", value=10.0, key="time_max")
+                    
+                    with col2:
+                        st.subheader("Y-Axis (Survival)")
+                        survival_min = st.number_input("Survival minimum", value=0.0, min_value=0.0, max_value=1.0, key="surv_min")
+                        survival_max = st.number_input("Survival maximum", value=1.0, min_value=0.0, max_value=1.0, key="surv_max")
+                    
+                    if st.button("🔍 Auto-Digitize", key="auto_digitize_btn"):
+                        with st.spinner("Extracting KM curve points..."):
+                            try:
+                                digitized_points = extract_km_points_from_image(
+                                    image_array,
+                                    time_min=time_min,
+                                    time_max=time_max,
+                                    survival_min=survival_min,
+                                    survival_max=survival_max
+                                )
+                                
+                                if digitized_points is not None and isinstance(digitized_points, pd.DataFrame) and len(digitized_points) > 0:
+                                    st.success(f"✅ Extracted {len(digitized_points)} KM points!")
+                                    st.dataframe(digitized_points, use_column_width=True)
+                                    
+                                    # Store in session for later use
+                                    st.session_state.auto_digitized_points = digitized_points
+                                    
+                                    # Download option
+                                    st.download_button(
+                                        "📥 Download Extracted Points as CSV",
+                                        data=digitized_points.to_csv(index=False),
+                                        file_name="auto_digitized_km_points.csv",
+                                        mime="text/csv",
+                                        key="download_auto_digitized"
+                                    )
+                                else:
+                                    st.error("❌ Could not detect curve in image. Try adjusting axis parameters or uploading a clearer image.")
+                            except Exception as e:
+                                st.error(f"❌ Error during digitization: {str(e)}")
+                                
+                except Exception as e:
+                    st.error(f"❌ Error loading image: {str(e)}")
     
     with tab1:
         st.subheader("Manual KM Upload")
