@@ -25,6 +25,7 @@ Then open `http://localhost:8501`.
 4. Select this repository and the branch containing the latest commits.
 5. Set the main file to `streamlit_app.py`.
 6. Set the requirements file to `requirements.txt`.
-7. Reboot or redeploy the app.
+7. Use Python 3.11, which is also declared in `runtime.txt` for deployment compatibility.
+8. Reboot or redeploy the app.
 
 After deployment, use the sidebar selector and choose **KM Registry Mortality** to see the new KM digitization, registry calibration, and parametric fitting workflow.
